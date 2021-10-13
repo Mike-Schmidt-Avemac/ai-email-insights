@@ -27,7 +27,7 @@ Part 3 - https://www.avemacconsulting.com/2021/09/23/email-insights-from-data-sc
  
  * **This source contains content preparation and feature extraction/topic modeling routines
  for unsupervised data processing to generate a supervised classification output for
- subsequent model training.*8
+ subsequent model training.**
 
  * The code has been tested for topic modeling sentiment and professional alignment. Some
  feature extraction was also included, but not used during the model process.
