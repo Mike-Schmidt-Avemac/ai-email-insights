@@ -532,7 +532,7 @@ class SupervisedRNN(nn.Module):
     def reset_weights(self, mode='fold'):
         ''' Method for initial weights and resetting weights between cross-validation folds '''
         minit = ModelSupport(self.config)
-        _ = minit.init_weights(self.embedding) if mode=='init' else None  # don't reset the embedding layer for CV
+        _ = minit.init_weights(self.embedding) if mode == 'init' else None
         minit.init_weights(self.rnn)
         minit.init_weights(self.fc)
         return
@@ -630,7 +630,7 @@ class SupervisedTransformer(nn.Module):
     def reset_weights(self, mode='fold'):
         ''' Method for initial weights and resetting weights between cross-validation folds '''
         minit = ModelSupport(self.config)
-        _ = minit.init_weights(self.embedding) if mode=='init' else None  # don't reset the embedding layer for CV
+        _ = minit.init_weights(self.embedding) if mode == 'init' else None
         minit.init_weights(self.encoder)
         minit.init_weights(self.fc)
         return
@@ -744,7 +744,7 @@ class SupervisedPrebuilt(nn.Module):
 
         return x, output_checks
 
-    def reset_weights(self):
+    def reset_weights(self, mode=None):
         ''' Method for initial weights and resetting weights between cross-validation folds '''
         # Prebuilt network is instantiated here so if CV is used a fresh model is reintroduced for each new fold.
         self.model = RobertaModel.from_pretrained(f'{self.config["pretrained_dir"]}{self.config["pretrained_model"]}', config=self.mconfig).to(DEVICE)
@@ -852,7 +852,7 @@ class ModelManagement():
         epochs = self.config['epochs']
 
         dataset = self.training_set
-        step_check = 5 * round(int((len(dataset) - len(dataset)*self.config['test_size']) // (bs*5)) / 5)
+        step_check = 5 * math.ceil(int((len(dataset) - len(dataset)*self.config['test_size']) // (bs*5)) / 5)
 
         kfolds = KFold(n_splits=self.config['kfolds'])
         
@@ -871,8 +871,8 @@ class ModelManagement():
             test_loader = DataLoader(dataset, batch_size=bs, sampler=SubsetRandomSampler(test_idx), drop_last=True)
 
             # if using k-fold "properly", reset model weights between folds
-            if self.config['cv_mode'] != 'blend':
-                self.model.reset_weights()
+            if self.config['cv_mode'] != 'blend' and fold > 0:
+                self.model.reset_weights(mode='fold')
 
             # epochs per fold
             for e in range(0, epochs):
