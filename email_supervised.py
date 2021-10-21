@@ -748,6 +748,7 @@ class SupervisedPrebuilt(nn.Module):
         ''' Method for initial weights and resetting weights between cross-validation folds '''
         # Prebuilt network is instantiated here so if CV is used a fresh model is reintroduced for each new fold.
         self.model = RobertaModel.from_pretrained(f'{self.config["pretrained_dir"]}{self.config["pretrained_model"]}', config=self.mconfig).to(DEVICE)
+        self.model.train()
         minit = ModelSupport(self.config)
         minit.init_weights(self.norm)
         minit.init_weights(self.fc)
@@ -872,7 +873,7 @@ class ModelManagement():
 
             # if using k-fold "properly", reset model weights between folds
             if self.config['cv_mode'] != 'blend' and fold > 0:
-                self.model.reset_weights(mode='fold')
+                self.model.reset_weights(mode='init')
 
             # epochs per fold
             for e in range(0, epochs):
@@ -948,7 +949,7 @@ class ModelManagement():
 
         # determine model iterations (i.e. using k-fold checkpoints or blended checkpoint)
         folds = 1 if self.config['cv_mode'] == 'blend' else self.config['kfolds']
-        print(f'\n--- Evaluating model {self.config["model_id"]} in mode "{self.config["cv_mode"]}" and {1 if self.config["cv_mode"]=="blend" else self.config["kfolds"]} folds')
+        print(f'\n--- Evaluating model {self.config["model_id"]} in mode "{self.config["cv_mode"]}" with {1 if self.config["cv_mode"]=="blend" else self.config["kfolds"]} folds')
 
         ensemble_preds = []
         ensemble_labels = []
@@ -957,7 +958,7 @@ class ModelManagement():
             model_fn = self.config['checkpoint_fn'].format(dir=self.config['checkpoint_dir'], fold=str(f), id=self.config['model_id'])
             if not os.path.exists(model_fn):
                 raise AssertionError('model checkpoint does not exist...something is wrong')
-            self.model.load_state_dict(torch.load(model_fn))
+            self.model.load_state_dict(torch.load(model_fn, map_location=DEVICE))
 
             ########
             # eval
@@ -1037,7 +1038,7 @@ class PipelineConfig():
         'trn': {'kfolds': 3, 'epochs': 20, 'batch_size': 64, 'embedding_len': 128, 'embedding_type':'train',
                 'max_tokens': 192, 'dropout': 0.2, 'learning_rate':8e-05, 'attention_heads':8, 'encoder_layers':4,
                 'clip_gradients':False, 'clip_max_norm': 5.0}, 
-        'pre': {'kfolds': 3, 'epochs': 10, 'batch_size': 64, 'embedding_type':'hgf_pretrained',
+        'pre': {'kfolds': 3, 'epochs': 5, 'batch_size': 64, 'embedding_type':'hgf_pretrained',
                 'max_tokens': 192, 'dropout': 0.1, 'learning_rate':1e-04, 'encoder_layers':1,
                 'clip_gradients':False, 'clip_max_norm': 5.0}, 
     }
@@ -1079,9 +1080,11 @@ class TrainingPipeline():
     def __init__(self, id:str, label_column:str, label_classes:int, config:dict=None, run_models=['lstm','gru','trn','pre']):
         self.id = id
         self.run_models = run_models
+        self.label_column = label_column
+        self.label_classes = label_classes
 
-        self.config = PipelineConfig(config).get_config()
-        self.config.update({'input_columns':{'Body':'content', label_column:'label'}, 'number_classes': label_classes})
+        self.config = PipelineConfig(config).get_config().copy()
+        self.config.update({'input_columns':{'Body':'content', self.label_column:'label'}, 'number_classes': self.label_classes})
 
         # load training data
         raw_data = RawDataLoader(self.config) # prep input data
@@ -1096,8 +1099,10 @@ class TrainingPipeline():
         # process all of the models in run_models
         for m in self.run_models:
             start = time()
-            config = PipelineConfig(None).get_config(model=m)
+            config = PipelineConfig(None).get_config(model=m).copy()
             config.update({'model_id':f'{m}-{self.id}'})
+            config.update({'input_columns':{'Body':'content', self.label_column:'label'}, 'number_classes': self.label_classes})
+            config.update({'vocab_size':len(self.vocab)})
 
             pipeline = self._get_pipeline(m, config)
             
@@ -1147,9 +1152,9 @@ class InferencePipeline():
         'Please plan to attend the quarterly disaster preparation meeting this Tuesday.  The location is TBD, but the time will from 10a - 2p.  Lunch will be included.',
         'Dave, good time playing poker last week.  I\'m heading out for a round of golf this afternoon and could use a partner.  How about 2pm?',
         'The weather today is expected to be rainy with a chance of thunderstorms and then clearing off for tomorrow...',
-        'The systems here are awful! I wish they would fix the user interface instead of trying to improve performance.  I hate this!',
-        'Work is okay I guess, but the company hasn\'t been doing well since the merger and I\'m afraid we could be in for a bumpy ride.',
-        'I never get to work on the projects I like the most.  Jim is always the one to land the best assignments.  I\'m going to complain to HR about the discrimination here.',
+        'The systems here are awful!  The building is rundown and in shambles. I wish they would fix this mess instead of sucking up to investors.  I hate this!',
+        'I expect many arrests soon given the catastrophic consequences.',
+        'I\'m bored and I hate my job.  My life is terrible, unfair and full of regrets.  My coworkers are being jerks and are the worst kind of people.',
     ]
 
     def __init__(self, run_labels:dict, label_classes:int, config:dict=None, run_models=['lstm','gru','trn','pre']):
@@ -1157,7 +1162,7 @@ class InferencePipeline():
         self.run_labels = run_labels
         self.label_classes = label_classes
 
-        self.config = PipelineConfig(config).get_config()
+        self.config = PipelineConfig(config).get_config().copy()
         self.vocab = Vocabulary(self.config).get_vocabulary()
 
         return
@@ -1176,11 +1181,14 @@ class InferencePipeline():
 
         # process each model within each label type
         ensemble_preds = []
+        ensemble_votes = []
         model_count = 0
         for key in self.run_labels.keys(): # e.g. cs1, cs2, cs3
             for m in self.run_models: # e.g. lstm, gru, trn, pre
-                config = PipelineConfig(None).get_config(model=m)
+                config = PipelineConfig(None).get_config(model=m).copy()
+                config.update({'number_classes': self.label_classes})
                 config.update({'model_id':f'{m}-{key}'})
+                config.update({'vocab_size':len(self.vocab)})
 
                 model_fn_wildcard = config['checkpoint_fn'].format(dir=config['checkpoint_dir'], fold='*', id=config['model_id'])
                 model_checkpoint_fns = glob.glob(model_fn_wildcard)
@@ -1188,7 +1196,7 @@ class InferencePipeline():
                     print(f'\n!!! Error - no checkpoints for model {config["model_id"]}')
                     continue
 
-                print(f'\n--- Infering model {config["model_id"]} in "{config["cv_mode"]}" mode and {len(model_checkpoint_fns)} folds')
+                print(f'\n--- Infering model {config["model_id"]} in "{config["cv_mode"]}" mode with {len(model_checkpoint_fns)} folds')
                 model_count += 1
 
                 inference_set = ContentDataset(inputs, config, vocab=self.vocab)
@@ -1198,7 +1206,7 @@ class InferencePipeline():
                 for model_fn in model_checkpoint_fns:
 
                     # load the model state for the current fold checkpoint
-                    model.load_state_dict(torch.load(model_fn))
+                    model.load_state_dict(torch.load(model_fn, map_location=DEVICE))
 
                     ########
                     # infer
@@ -1214,6 +1222,7 @@ class InferencePipeline():
 
                     # save fold predictions for ensemble calculations
                     ensemble_preds.append(preds_e)
+                    ensemble_votes.append(np.argmax(preds_e, axis=1).tolist())
 
                 del model
                 gc.collect()
@@ -1223,7 +1232,11 @@ class InferencePipeline():
         ensemble_preds = np.transpose(ensemble_preds, (1, 0, 2)) # alter matrix to (samples X folds X prediction probabilities)
         ensemble_preds = np.sum(ensemble_preds, axis=1) # sum all the probabilities by class and fold
         ensemble_preds = np.argmax(ensemble_preds, axis=1) # select the class with the highest sum
-        outputs['predictions'] = ensemble_preds.tolist()
+        outputs['pred_prob'] = ensemble_preds.tolist()
+
+        ensemble_votes = np.transpose(ensemble_votes, (1, 0))
+        ensemble_votes = np.median(ensemble_votes, axis=1).astype(int)
+        outputs['pred_vote'] = ensemble_votes.tolist()
 
         print(f'\n--- Inference pipeline runtime for {model_count} models complete in {time()-start} seconds\n')
         print(outputs.head(50))
@@ -1246,7 +1259,7 @@ print(f'\n--- Device is {DEVICE}')
 # models = ['lstm','gru','trn','pre']
 #
 run_labels = {'cs1':'Class_Sentiment_1','cs2':'Class_Sentiment_2','csv':'Class_Sentiment_Vader'}
-run_models = ['lstm','gru','trn','pre']
+run_models = ['lstm','gru','trn'] # 'pre'
 
 # Process each label type and network model defined in 'run_labels' and 'run_models'
 # 'blend' will not reset weights between folds, use some other value (i.e. not 'blend') to separate folds for mean selection
@@ -1260,6 +1273,9 @@ for key, run_label in run_labels.items():
 ##############################################################################################################################
 
 # Aggregate models to predict most likely outcome
+# TODO add weights
+run_labels = {'cs1':''} 
+run_models = ['trn']
 predictions = InferencePipeline(run_labels, 3, run_models=run_models).run_pipeline()
 
 exit()
